@@ -4,7 +4,7 @@
  */
 import { intersect, offset, opening, type Shape } from './geom';
 import type { Plan } from './plan';
-import { checkGrbl } from './post';
+import { checkFormat, dwellSeconds, machineFor, stripComment, type Machine } from './post';
 import type { Job25, Tool25 } from './types';
 
 export const SIM_RES = 0.1;
@@ -138,39 +138,38 @@ interface Motion {
   kind: string;
 }
 
-/** Parse GRBL G-code into straight motions (arcs linearised), in model coordinates. */
-function parseGcode(text: string, ox: number, oy: number, oz: number, onOp: (label: string) => void) {
+/** Parse G-code (any supported dialect) into straight motions (arcs linearised), in model coordinates. */
+function parseGcode(text: string, ox: number, oy: number, oz: number, m: Machine, onOp: (label: string) => void) {
   const out: Motion[] = [];
   let x = 0, y = 0, z = 0, f = 0, g = 0;
   let known = false;
   let op = '', kind = '';
   let dwell = 0;
   for (const raw of text.split('\n')) {
-    const cm = raw.match(/^\(OP ([^)]*)\)/);
+    const cm = raw.match(/^(?:\(OP ([^)]*)\)|; OP (.*))$/i);
     if (cm) {
-      op = cm[1];
-      kind = op.split(' ')[0];
+      op = cm[1] ?? cm[2];
+      kind = op.split(' ')[0].toLowerCase();
       onOp(op);
       out.push({ g: -1, x0: 0, y0: 0, z0: 0, x1: 0, y1: 0, z1: 0, f: 0, op, kind }); // marker
       continue;
     }
-    const line = raw.replace(/\([^)]*\)/g, '').trim().toUpperCase();
+    const line = stripComment(raw).toUpperCase();
     if (!line) continue;
+    if (/\bG(28|53)\b/.test(line)) continue; // machine-coordinate return (Fanuc footer), not a work move
+    if (/\bG0?4\b/.test(line)) { dwell += dwellSeconds(line, m); continue; }
     const words = [...line.matchAll(/([A-Z])\s*(-?[\d.]+)/g)].map((m) => [m[1], parseFloat(m[2])] as const);
-    let nx = x, ny = y, nz = z, I = 0, J = 0, move = false, isG4 = false, P = 0;
+    let nx = x, ny = y, nz = z, I = 0, J = 0, move = false;
     for (const [L, v] of words) {
       if (L === 'G') {
-        if (v === 4) isG4 = true;
-        else if (v <= 3) { g = v; }
+        if (v <= 3) g = v;
       } else if (L === 'X') { nx = v + ox; move = true; }
       else if (L === 'Y') { ny = v + oy; move = true; }
       else if (L === 'Z') { nz = v + oz; move = true; }
       else if (L === 'I') I = v;
       else if (L === 'J') J = v;
       else if (L === 'F') f = v;
-      else if (L === 'P') P = v;
     }
-    if (isG4) { dwell += P; continue; }
     if (!move) continue;
     if (!known) {
       // first positioning move: only Z may be known; treat position as current
@@ -204,6 +203,7 @@ function parseGcode(text: string, ox: number, oy: number, oz: number, onOp: (lab
 
 export function verifyJob(pos: Float32Array, plan: Plan, job: Job25, files: SimFile[]): VerifyReport {
   const { stock } = plan;
+  const machine = machineFor(job);
   const maxD = Math.max(...files.map((f) => f.tool.diameter));
   const margin = maxD + 5;
   const g = new SimGrid(stock.minX - margin, stock.minY - margin, stock.maxX - stock.minX + 2 * margin, stock.maxY - stock.minY + 2 * margin, stock.top);
@@ -245,7 +245,7 @@ export function verifyJob(pos: Float32Array, plan: Plan, job: Job25, files: SimF
   };
 
   for (const file of files) {
-    const problems = checkGrbl(file.text).map((p) => `GRBL format: ${p}`);
+    const problems = checkFormat(file.text, machine).map((p) => `${machine.short} format: ${p}`);
     const r = file.tool.diameter / 2;
     const rG = r - 0.02; // footprint for gouge detection (0.02 mm XY tolerance)
     const rE = r - 0.03; // footprint for engagement / rapid checks (ignore grazing the edge of a wall)
@@ -253,7 +253,7 @@ export function verifyJob(pos: Float32Array, plan: Plan, job: Job25, files: SimF
     let opSum: OpSummary | null = null;
     let seconds = 0;
     const cutoutPasses: string[] = [];
-    const { motions, dwell } = parseGcode(file.text, stock.minX, stock.minY, stock.top, () => {});
+    const { motions, dwell } = parseGcode(file.text, stock.minX, stock.minY, stock.top, machine, () => {});
     seconds += dwell;
     let lastWasCutout = false;
     const closeCutoutPass = (label: string, isLast: boolean) => {
@@ -392,7 +392,7 @@ export function verifyJob(pos: Float32Array, plan: Plan, job: Job25, files: SimF
   }
 
   const grblProblems = fileReports.flatMap((f) => f.problems);
-  checks.push({ name: 'GRBL format', ok: grblProblems.length === 0, detail: grblProblems.slice(0, 5).join('; ') || 'all rules pass' });
+  checks.push({ name: `${machine.short} format`, ok: grblProblems.length === 0, detail: grblProblems.slice(0, 5).join('; ') || 'all rules pass' });
   checks.push({ name: 'No gouge', ok: gougeCount === 0, detail: gougeCount ? `${gougeCount} cells, up to ${gougeMax.toFixed(3)} mm into the part` : 'never below the model surface (0.02 mm tolerance)' });
   checks.push({ name: 'Floors exact', ok: floorFails.length === 0, detail: floorFails.join('; ') || 'all flat levels within ±0.02 mm' });
   checks.push({ name: 'Rapids clear', ok: rapidCount === 0, detail: rapidCount ? `${rapidCount} cells hit by G0 moves` : 'no G0 move touches material' });

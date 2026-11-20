@@ -17,7 +17,19 @@ It produces three files, run in this order with the same XY zero, re-zeroing onl
 2. **Rest and detail** with the small tool. Only the areas the large tool couldn't reach (region minus its opening by the large radius). Plus an optional full-depth wall-finishing pass with tangent arc lead-in and lead-out.
 3. **Cut-out** with the large tool. A profile outside the outline, stepping down to stock bottom minus the through depth. Holding tabs are evenly spaced and kept off sharp corners; zig-zag ramps.
 
-Geometry is vector-sliced from the mesh: plane cross-sections become polygons, with Clipper2 (`clipper2-ts`) for offsets and booleans. Rings are simplified to ≤ 0.01 mm and refitted to G2/G3 arcs, and no point is snapped to a grid. Output targets GRBL 1.1: no M6/G28/G30, lines ≤ 70 characters, and a fixed header and footer.
+Geometry is vector-sliced from the mesh: plane cross-sections become polygons, with Clipper2 (`clipper2-ts`) for offsets and booleans. Rings are simplified to ≤ 0.01 mm and refitted to G2/G3 arcs, and no point is snapped to a grid. Lines are ≤ 70 characters and arcs stay under 180° with incremental I/J.
+
+## Machine / controller
+
+Pick the controller under **Settings**. The toolpaths are identical for every choice; only the G-code dialect changes, and each file is checked against its own dialect's rules before export.
+
+| Controller | File | Differences |
+|---|---|---|
+| GRBL / FluidNC / grblHAL | `.nc` | `( )` comments, `G4 P3` (seconds), ends `M5 M30`. No M6/G28/G30. |
+| LinuxCNC / PathPilot | `.ngc` | Adds `G91.1` (incremental arc centres) and `G64 P0.01`. |
+| Mach3 / Mach4 | `.tap` | Adds `G91.1 G40 G49`. Dwell assumes seconds (Mach's default). |
+| Marlin (Snapmaker, MPCNC, LowRider) | `.gcode` | `;` comments, `G4 S3`, no `G17/G94/M30`. `M3 S` is RPM. |
+| Fanuc / Haas | `.nc` | `%` and `O####` wrapper, `G54`, `T# M6` + `G43 H#`, `G4 P3000` (ms), decimal point on every axis value, upper case, ends `G91 G28 Z0.` `M30`. |
 
 Every export is first **verified** by simulating the actual G-code text on a 0.1 mm heightmap. It checks for gouges, exact floors, rapids into material, axial engagement, plunges into material, tab attachment and maximum depth. Files that fail are not exported. The report includes run time, a per-operation summary and a top-down PNG with gouges in red.
 

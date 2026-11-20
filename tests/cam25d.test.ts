@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { area, difference, regions, union } from '../src/cam25d/geom';
 import { restRegion, splitLayers } from '../src/cam25d/plan';
-import { checkGrbl, comment, MAX_LINE } from '../src/cam25d/post';
+import { checkFormat, checkGrbl, comment, MACHINES, MAX_LINE, stripComment } from '../src/cam25d/post';
 import { runJob } from '../src/cam25d/run';
 import { detectLevels, SlicedModel, sliceMesh } from '../src/cam25d/slice';
 import { PathLoop, placeTabs } from '../src/cam25d/toolpath';
-import { defaultJob } from '../src/cam25d/types';
+import { defaultJob, type MachineId } from '../src/cam25d/types';
 import { verifyJob } from '../src/cam25d/verify';
 
 import { circle, outline, part, pocketA, pocketB, rect, slot } from './parts';
@@ -186,3 +186,73 @@ describe('2.5D job end to end', () => {
 });
 
 
+
+// ------------------------------------------------------------------ controller dialects
+
+describe('post-processor per controller', () => {
+  const ids = Object.keys(MACHINES) as MachineId[];
+  const outs = Object.fromEntries(ids.map((id) => [id, runJob(part, { ...defaultJob('test-part.stl'), machine: id })]));
+  const code = (text: string) => text.split('\n').map(stripComment).filter(Boolean);
+
+  it.each(ids)('%s: every file verifies and passes its own format rules', (id) => {
+    const out = outs[id];
+    if (!out.report.ok) console.log(id, out.report.checks.filter((c) => !c.ok));
+    expect(out.report.ok).toBe(true);
+    for (const f of out.files) {
+      expect(f.name.endsWith(`.${MACHINES[id].ext}`)).toBe(true);
+      expect(checkFormat(f.text, MACHINES[id])).toEqual([]);
+    }
+  });
+
+  it('toolpaths are identical across controllers (same time estimates)', () => {
+    const secs = (id: MachineId) => outs[id].report.files.map((f) => Math.round(f.seconds));
+    for (const id of ids) expect(secs(id)).toEqual(secs('grbl'));
+  });
+
+  it('GRBL output is unchanged: seconds dwell, ( ) comments, M30', () => {
+    const c = code(outs.grbl.files[0].text);
+    expect(c.slice(0, 4)).toEqual(['G21 G90 G17 G94', 'G0 Z5', 'M3 S16000', 'G4 P3']);
+    expect(c.slice(-3)).toEqual(['G0 Z5', 'M5', 'M30']);
+  });
+
+  it('LinuxCNC and Mach force incremental arc centres', () => {
+    expect(outs.linuxcnc.files[0].text).toContain('G91.1');
+    expect(outs.mach.files[0].text).toContain('G91.1');
+  });
+
+  it('Marlin: ; comments only, G4 S dwell, no G94/M30', () => {
+    const t = outs.marlin.files[0].text;
+    expect(t).not.toMatch(/[()]/);
+    expect(t).toMatch(/^; OP /m);
+    expect(t).toContain('\nG4 S3\n');
+    expect(t).not.toMatch(/\bG94\b|\bM30\b/);
+    expect(code(t).slice(-2)).toEqual(['G0 Z5', 'M5']);
+  });
+
+  it('Fanuc/Haas: program wrapper, tool change with length offset, ms dwell, decimal points', () => {
+    const files = outs.fanuc.files;
+    files.forEach((f, i) => {
+      const lines = f.text.trimEnd().split('\n');
+      expect(lines[0]).toBe('%');
+      expect(lines[1]).toMatch(new RegExp(`^O${1001 + i} \\(`));
+      expect(lines.at(-1)).toBe('%');
+      const tn = outs.fanuc.plan.files[i].tool.number;
+      expect(f.text).toContain(`\nT${tn} M6\nG0 G43 H${tn} Z5.\n`);
+      expect(f.text).toContain('\nG4 P3000\n');
+      expect(f.text).toContain('\nG91 G28 Z0.\nG90\nM30\n%\n');
+      for (const l of code(f.text)) expect(l).not.toMatch(/\b[XYZIJ]-?\d+(?![\d.])/);
+      expect(f.text).not.toMatch(/[a-z]/); // upper-case only
+    });
+  });
+
+  it('format checker catches dialect mistakes', () => {
+    const fan = outs.fanuc.files[0].text;
+    expect(checkFormat(fan.replace(/X(\d+)\./, 'X$1'), MACHINES.fanuc).join()).toMatch(/decimal point/);
+    expect(checkFormat(fan.replace('G4 P3000', 'G4 P3'), MACHINES.fanuc).join()).toMatch(/dwell/);
+    expect(checkFormat(fan.replace(/G43 H\d+ /, ''), MACHINES.fanuc).join()).toMatch(/G43/);
+    const mar = outs.marlin.files[0].text;
+    expect(checkFormat(mar.replace('; OP', '(OP') , MACHINES.marlin).join()).toMatch(/\( \) comments/);
+    expect(checkFormat(outs.grbl.files[0].text, MACHINES.marlin)).not.toEqual([]);
+    expect(checkFormat(outs.marlin.files[0].text, MACHINES.grbl).join()).toMatch(/dwell|M30/);
+  });
+});

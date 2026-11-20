@@ -1,25 +1,88 @@
 /**
- * GRBL 1.1 post-processor.
- * Rules: no G28/G30, no M6; parenthesised comments without nesting; lines ≤ 70 chars;
- * header G21 G90 G17 G94, safe Z, M3 S…, dwell; footer safe Z, M5, M30.
+ * G-code post-processor with one profile per controller family (GRBL, LinuxCNC, Mach3/4, Marlin, Fanuc/Haas).
+ * The toolpaths are identical for every profile; only the file dialect changes:
+ * comment style, number format, dwell units, setup/end blocks and tool-change handling.
+ * Common rules: lines ≤ 70 chars, single-level comments, arcs < 180° with incremental I/J.
  * Constant-Z feed runs are refitted to G2/G3 arcs where they match within ARC_FIT_TOL.
  */
-import type { Job25, Move, NcPlan, Stock25, Tool25 } from './types';
+import type { Job25, MachineId, Move, NcPlan, Stock25, Tool25 } from './types';
 
 export const MAX_LINE = 70;
 export const ARC_FIT_TOL = 0.005;
 
-const num = (v: number) => {
+export interface Machine {
+  id: MachineId;
+  label: string;
+  /** Short name used in verification messages. */
+  short: string;
+  /** One-line hint shown under the picker. */
+  note: string;
+  ext: string;
+  /** ';' comments (Marlin) instead of '( … )'. */
+  semicolon: boolean;
+  /** Upper-case comments (older Fanuc controls reject lower case). */
+  upper: boolean;
+  /** Always write a decimal point on X/Y/Z/I/J (Fanuc reads "X10" as 10 µm). */
+  decimal: boolean;
+  /** G4 P is milliseconds (Fanuc/Haas) rather than seconds. */
+  dwellPms: boolean;
+  /** Uses T# M6 + G43 H# tool length offsets instead of hand re-zeroing Z. */
+  atc: boolean;
+  /** Modal setup line; must appear before the first move. */
+  setup: string;
+  dwell: string;
+  /** Lines after the final safe-Z raise. */
+  end: string[];
+}
+
+export const MACHINES: Record<MachineId, Machine> = {
+  grbl: {
+    id: 'grbl', label: 'GRBL / FluidNC / grblHAL', short: 'GRBL', ext: 'nc',
+    note: 'Shapeoko, X-Carve, Genmitsu, OpenBuilds and most hobby routers.',
+    semicolon: false, upper: false, decimal: false, dwellPms: false, atc: false,
+    setup: 'G21 G90 G17 G94', dwell: 'G4 P3', end: ['M5', 'M30'],
+  },
+  linuxcnc: {
+    id: 'linuxcnc', label: 'LinuxCNC / PathPilot', short: 'LinuxCNC', ext: 'ngc',
+    note: 'Also Tormach PathPilot. Adds G91.1 (incremental arc centres) and G64 P0.01 blending.',
+    semicolon: false, upper: false, decimal: false, dwellPms: false, atc: false,
+    setup: 'G21 G90 G17 G94 G91.1 G64 P0.01', dwell: 'G4 P3', end: ['M5', 'M30'],
+  },
+  mach: {
+    id: 'mach', label: 'Mach3 / Mach4', short: 'Mach', ext: 'tap',
+    note: 'Sets G91.1 so arcs are right whatever the IJ setting. Dwell assumes seconds (the default).',
+    semicolon: false, upper: false, decimal: false, dwellPms: false, atc: false,
+    setup: 'G21 G90 G17 G94 G91.1 G40 G49', dwell: 'G4 P3', end: ['M5', 'M30'],
+  },
+  marlin: {
+    id: 'marlin', label: 'Marlin (Snapmaker, MPCNC, LowRider)', short: 'Marlin', ext: 'gcode',
+    note: '; comments, G4 S dwell, no M30. M3 S is RPM, so set Marlin to RPM or use a manual router.',
+    semicolon: true, upper: false, decimal: false, dwellPms: false, atc: false,
+    setup: 'G21 G90', dwell: 'G4 S3', end: ['M5'],
+  },
+  fanuc: {
+    id: 'fanuc', label: 'Fanuc / Haas (tool changer)', short: 'Fanuc', ext: 'nc',
+    note: 'G54, T# M6 with G43 H# length offsets, decimal points on every axis, G4 P in ms.',
+    semicolon: false, upper: true, decimal: true, dwellPms: true, atc: true,
+    setup: 'G21 G90 G17 G94 G40 G49 G80', dwell: 'G4 P3000', end: ['M5', 'G91 G28 Z0.', 'G90', 'M30', '%'],
+  },
+};
+
+export const machineFor = (job: { machine?: MachineId }): Machine => MACHINES[job.machine ?? 'grbl'] ?? MACHINES.grbl;
+
+const num = (v: number, decimal = false) => {
   if (!Number.isFinite(v)) throw new Error(`Refusing to write a non-finite number (${v}) to G-code`);
   let s = v.toFixed(3);
   if (s.includes('.')) s = s.replace(/0+$/, '').replace(/\.$/, '');
-  return s === '-0' ? '0' : s;
+  if (s === '-0') s = '0';
+  return decimal && !s.includes('.') ? `${s}.` : s;
 };
 
-/** Comment text safe for GRBL: no parentheses, single line, clipped to fit MAX_LINE. */
-export function comment(text: string): string {
-  const clean = text.replace(/[()]/g, '').replace(/[\r\n]+/g, ' ').trim();
-  return `(${clean.slice(0, MAX_LINE - 2)})`;
+/** Comment safe for the target controller: no parentheses, single line, clipped to fit MAX_LINE. */
+export function comment(text: string, m: Machine = MACHINES.grbl): string {
+  let clean = text.replace(/[()]/g, '').replace(/[\r\n]+/g, ' ').replace(/;/g, ',').trim();
+  if (m.upper) clean = clean.toUpperCase();
+  return m.semicolon ? `; ${clean.slice(0, MAX_LINE - 2)}` : `(${clean.slice(0, MAX_LINE - 2)})`;
 }
 
 export function toolSlug(t: Tool25) {
@@ -28,7 +91,7 @@ export function toolSlug(t: Tool25) {
 
 export function fileName(job: Job25, plan: NcPlan) {
   const base = job.partName.replace(/\.[^.]+$/, '');
-  return `${base}_${plan.index}_${plan.title}_${toolSlug(plan.tool)}.nc`;
+  return `${base}_${plan.index}_${plan.title}_${toolSlug(plan.tool)}.${machineFor(job).ext}`;
 }
 
 export interface PostResult {
@@ -147,6 +210,9 @@ export function segLength(prev: { x: number; y: number; z: number }, s: Seg): nu
 }
 
 export function postFile(job: Job25, plan: NcPlan, stock: Stock25, allTools: Tool25[], fileCount = 3): PostResult {
+  const m = machineFor(job);
+  const n = (v: number) => num(v, m.decimal);
+  const c = (text: string) => comment(text, m);
   const ox = stock.minX, oy = stock.minY, oz = stock.top;
   const safe = job.clearance;
   const t = plan.tool;
@@ -156,11 +222,11 @@ export function postFile(job: Job25, plan: NcPlan, stock: Stock25, allTools: Too
   let mode = -1;
   let lx = '', ly = '', lz = '', lf = -1;
   for (const op of plan.ops) {
-    body.push(comment(`OP ${op.label}`));
+    body.push(c(`OP ${op.label}`));
     for (const s of toSegs(op.moves, ox, oy, oz)) {
       const len = segLength(pos, s);
       seconds += s.g === 0 ? (len / job.rapidRate) * 60 : (len / s.f) * 60;
-      const sx = num(s.x), sy = num(s.y), sz = num(s.z);
+      const sx = n(s.x), sy = n(s.y), sz = n(s.z);
       const arc = s.g >= 2;
       const axes: string[] = [];
       if (sx !== lx || arc) axes.push(`X${sx}`);
@@ -171,7 +237,7 @@ export function postFile(job: Job25, plan: NcPlan, stock: Stock25, allTools: Too
       const parts: string[] = [];
       if (s.g !== mode || arc) parts.push(`G${s.g}`);
       parts.push(...axes);
-      if (arc) parts.push(`I${num(s.i!)}`, `J${num(s.j!)}`);
+      if (arc) parts.push(`I${n(s.i!)}`, `J${n(s.j!)}`);
       if (s.g !== 0 && s.f !== lf) {
         parts.push(`F${Math.round(s.f)}`);
         lf = s.f;
@@ -183,57 +249,106 @@ export function postFile(job: Job25, plan: NcPlan, stock: Stock25, allTools: Too
   }
 
   const head: string[] = [];
-  const cutting = plan.ops.some((o) => o.moves.some((m) => m.g !== 0));
+  const base = job.partName.replace(/\.[^.]+$/, '');
+  if (m.atc) head.push('%', `O${1000 + plan.index} ${c(`${base} ${plan.index} ${plan.title}`.slice(0, MAX_LINE - 10))}`);
+  const cutting = plan.ops.some((o) => o.moves.some((mv) => mv.g !== 0));
   const est = cutting && Number.isFinite(seconds) ? `${Math.max(1, Math.ceil(seconds / 60))} min` : 'no cutting moves';
-  head.push(comment(`CAMSlicer 2.5D - ${job.partName}`));
-  head.push(comment(`File ${plan.index} of ${fileCount}, run in order: ${plan.title}`));
-  head.push(comment(`Tool T${t.number}: ${t.name}`));
-  head.push(comment(`T${t.number} D${num(t.diameter)} mm, ${t.flutes} flute, stepdown ${num(t.stepdown)} mm`));
-  head.push(comment(`Stepover ${Math.round(t.stepover * 100)} pct, ramp ${num(t.rampAngle)} deg, ${t.rpm} rpm`));
-  head.push(comment('Tools in this job:'));
-  for (const tt of allTools) head.push(comment(` T${tt.number} ${tt.name} D${num(tt.diameter)} ${tt.flutes}F SD${num(tt.stepdown)}`));
-  head.push(comment(`Stock ${num(stock.maxX - stock.minX)} x ${num(stock.maxY - stock.minY)} x ${num(stock.top - stock.bottom)} mm`));
-  head.push(comment('XY0 = front-left corner of stock, Z0 = stock top'));
-  head.push(comment('Same XY zero for all files; re-zero Z only after a bit change'));
-  head.push(comment(`Est. run time ${est}`));
-  head.push('G21 G90 G17 G94');
-  head.push(`G0 Z${num(safe)}`);
-  head.push(`M3 S${Math.round(t.rpm)}`);
-  head.push('G4 P3');
+  head.push(c(`CAMSlicer 2.5D - ${job.partName}`));
+  head.push(c(`Post: ${m.label}`));
+  head.push(c(`File ${plan.index} of ${fileCount}, run in order: ${plan.title}`));
+  head.push(c(`Tool T${t.number}: ${t.name}`));
+  head.push(c(`T${t.number} D${num(t.diameter)} mm, ${t.flutes} flute, stepdown ${num(t.stepdown)} mm`));
+  head.push(c(`Stepover ${Math.round(t.stepover * 100)} pct, ramp ${num(t.rampAngle)} deg, ${t.rpm} rpm`));
+  head.push(c('Tools in this job:'));
+  for (const tt of allTools) head.push(c(` T${tt.number} ${tt.name} D${num(tt.diameter)} ${tt.flutes}F SD${num(tt.stepdown)}`));
+  head.push(c(`Stock ${num(stock.maxX - stock.minX)} x ${num(stock.maxY - stock.minY)} x ${num(stock.top - stock.bottom)} mm`));
+  if (m.atc) {
+    head.push(c('G54: XY0 = front-left corner of stock, Z0 = stock top'));
+    head.push(c('Tool lengths in H offsets matching the T numbers'));
+  } else {
+    head.push(c('XY0 = front-left corner of stock, Z0 = stock top'));
+    head.push(c('Same XY zero for all files, re-zero Z only after a bit change'));
+  }
+  head.push(c(`Est. run time ${est}`));
+  head.push(m.setup);
+  if (m.atc) {
+    head.push('G54', `T${t.number} M6`, `G0 G43 H${t.number} Z${n(safe)}`, `S${Math.round(t.rpm)} M3`);
+  } else {
+    head.push(`G0 Z${n(safe)}`, `M3 S${Math.round(t.rpm)}`);
+  }
+  head.push(m.dwell);
   seconds += 1;
-  while (body.length && body[body.length - 1] === `G0 Z${num(safe)}`) body.pop(); // footer raises Z
-  const foot = [`G0 Z${num(safe)}`, 'M5', 'M30'];
+  while (body.length && body[body.length - 1] === `G0 Z${n(safe)}`) body.pop(); // footer raises Z
+  const foot = [`G0 Z${n(safe)}`, ...m.end];
   return { text: [...head, ...body, ...foot].join('\n') + '\n', seconds: seconds + 2 };
 }
 
-/** Validate the GRBL formatting rules; returns a list of problems (empty = OK). */
-export function checkGrbl(text: string): string[] {
+/** Strip comments in the controller's style. */
+export function stripComment(line: string): string {
+  return line.replace(/\([^()]*\)/g, '').replace(/;.*$/, '').trim();
+}
+
+/** Seconds a G4 line dwells for, in the controller's units. */
+export function dwellSeconds(code: string, m: Machine): number {
+  const S = code.match(/\bS\s*([\d.]+)/);
+  if (S) return parseFloat(S[1]);
+  const P = code.match(/\bP\s*([\d.]+)/);
+  if (!P) return 0;
+  return m.dwellPms && !P[1].includes('.') ? parseFloat(P[1]) / 1000 : parseFloat(P[1]);
+}
+
+/** Validate the controller's formatting rules; returns a list of problems (empty = OK). */
+export function checkFormat(text: string, m: Machine = MACHINES.grbl): string[] {
   const problems: string[] = [];
   const lines = text.split('\n').filter((l, i, a) => !(i === a.length - 1 && l === ''));
+  const endStart = lines.length - m.end.length;
   lines.forEach((l, i) => {
     if (/Infinity|NaN/i.test(l)) problems.push(`line ${i + 1} contains Infinity/NaN`);
     if (l.length > MAX_LINE) problems.push(`line ${i + 1} longer than ${MAX_LINE} chars`);
-    const code = l.replace(/\([^()]*\)/g, '');
-    if (/[()]/.test(code)) problems.push(`line ${i + 1} has nested or unbalanced parentheses`);
-    if (/\bG(28|30)\b/.test(code)) problems.push(`line ${i + 1} uses G28/G30`);
-    if (/\bM0?6\b/.test(code) || /\bT\d+/.test(code)) problems.push(`line ${i + 1} has a tool change`);
+    const noParen = l.replace(/\([^()]*\)/g, '');
+    if (m.semicolon ? /[()]/.test(l) : /[()]/.test(noParen)) {
+      problems.push(m.semicolon ? `line ${i + 1} uses ( ) comments` : `line ${i + 1} has nested or unbalanced parentheses`);
+    }
+    const code = stripComment(l);
+    if (/\bG(28|30)\b/.test(code) && !(m.atc && i >= endStart)) problems.push(`line ${i + 1} uses G28/G30`);
+    if (!m.atc && (/\bM0?6\b/.test(code) || /\bT\d+/.test(code))) problems.push(`line ${i + 1} has a tool change`);
+    if (m.decimal && /\b[XYZIJ]-?\d+(?![\d.])/.test(code)) problems.push(`line ${i + 1} has an axis value without a decimal point`);
   });
-  const code = lines.filter((l) => !l.startsWith('('));
-  if (code[0] !== 'G21 G90 G17 G94') problems.push('first code line is not "G21 G90 G17 G94"');
-  if (!/^G0 Z\d/.test(code[1] ?? '')) problems.push('second code line does not raise Z to a safe height');
-  if (!/^M3 S\d+$/.test(code[2] ?? '')) problems.push('spindle start "M3 S…" missing after safe Z');
-  if (!/^G4 P[\d.]+$/.test(code[3] ?? '')) problems.push('dwell after spindle start missing');
-  const end = code.slice(-3);
-  if (!/^G0 Z\d/.test(end[0] ?? '') || end[1] !== 'M5' || end[2] !== 'M30') problems.push('file must end with G0 Z<safe>, M5, M30');
+  const code = lines.map(stripComment).filter((l) => l);
+  const isMove = (l: string) => /\bG0*[0-3]\b/.test(l) && /[XY]/.test(l) && !/\bG(28|53)\b/.test(l);
+  const firstMove = code.findIndex(isMove);
+  const firstCut = code.findIndex((l, i) => i >= firstMove && /\bG0*[1-3]\b/.test(l));
+  const setupAt = code.indexOf(m.setup);
+  if (setupAt < 0 || (firstMove >= 0 && setupAt > firstMove)) problems.push(`setup line "${m.setup}" missing before the first move`);
+  const raise = code.findIndex((l) => /\bG0\b/.test(l) && /Z\d/.test(l));
+  if (raise < 0 || (firstMove >= 0 && raise > firstMove)) problems.push('Z is not raised to a safe height before the first XY move');
+  const spindle = code.findIndex((l) => /\bM0?3\b/.test(l) && /\bS\d/.test(l));
+  if (spindle < 0 || (firstCut >= 0 && spindle > firstCut)) problems.push('spindle start "M3 S…" missing before the first cut');
+  const dwell = code.findIndex((l, i) => i > spindle && /\bG0?4\b/.test(l));
+  if (spindle >= 0 && (dwell < 0 || (firstCut >= 0 && dwell > firstCut) || dwellSeconds(code[dwell], m) < 1)) {
+    problems.push('dwell of at least 1 s after spindle start missing');
+  }
+  if (m.atc) {
+    const tc = code.find((l) => /\bT\d+\s+M0?6\b/.test(l))?.match(/T(\d+)/)?.[1];
+    if (!tc) problems.push('tool change "T# M6" missing');
+    else if (!code.some((l) => new RegExp(`\\bG43\\b.*\\bH${tc}\\b`).test(l))) problems.push(`G43 H${tc} length offset missing`);
+  }
+  const tail = code.slice(-(m.end.length + 1));
+  if (!/^G0 Z\d/.test(tail[0] ?? '') || tail.slice(1).join('|') !== m.end.join('|')) {
+    problems.push(`file must end with G0 Z<safe>, ${m.end.join(', ')}`);
+  }
   if (!hasCuttingMoves(text)) problems.push('file has no cutting moves');
   return problems;
 }
+
+/** GRBL rules (kept for the CLI and older tests). */
+export const checkGrbl = (text: string) => checkFormat(text, MACHINES.grbl);
 
 /** True if any line moves an axis while the modal motion is G1/G2/G3. */
 export function hasCuttingMoves(text: string): boolean {
   let mode = 0;
   for (const raw of text.split('\n')) {
-    const l = raw.replace(/\([^)]*\)/g, '').toUpperCase();
+    const l = stripComment(raw).toUpperCase();
     const g = l.match(/\bG0*([0-3])\b/);
     if (g) mode = +g[1];
     if (mode >= 1 && /[XYZ]\s*-?[\d.]/.test(l)) return true;

@@ -11,8 +11,12 @@ export interface Tool25 {
   rampAngle: number; // degrees
 }
 
+export type MachineId = 'grbl' | 'linuxcnc' | 'mach' | 'marlin' | 'fanuc';
+
 export interface Job25 {
   partName: string;
+  /** G-code dialect; default GRBL. */
+  machine?: MachineId;
   /** Tools in any order; they are used largest-first. */
   tools: Tool25[];
   /** Stock thickness; default = model height + topOffset. */

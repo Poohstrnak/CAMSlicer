@@ -2,7 +2,8 @@
  * CAMSlicer UI. There is exactly one toolpath generator: the 2.5D engine in ./cam25d, run in a worker,
  * whose output is verified by simulation before anything can be exported.
  */
-import type { Job25, Stock25, Tool25 } from './cam25d/types';
+import { MACHINES } from './cam25d/post';
+import type { Job25, MachineId, Stock25, Tool25 } from './cam25d/types';
 import type { VerifyReport } from './cam25d/verify';
 import { loadModel, meshBounds, placeOnBed, rotate90 } from './loaders';
 import { DEFAULT_TOOLS, loadTools, newTool, saveTools, type Tool } from './tools';
@@ -14,7 +15,7 @@ const num = (id: string) => parseFloat($<HTMLInputElement>(id).value);
 // v2: tab height now means "above the final cut-out depth"; older saved values (e.g. 2 mm from the
 // stock bottom) would leave tabs far too tall, so v1 settings are intentionally not restored.
 const STATE_KEY = 'camslicer.state.v2';
-const FIELDS = ['sZ', 'mTop', 'cutMode', 'cutDepth', 'tabCount', 'tabW', 'tabH', 'clear', 'rapid', 'stlUnits', 'floorPass', 'wallFinish', 'finStep'];
+const FIELDS = ['machine', 'sZ', 'mTop', 'cutMode', 'cutDepth', 'tabCount', 'tabW', 'tabH', 'clear', 'rapid', 'stlUnits', 'floorPass', 'wallFinish', 'finStep'];
 
 let tools: Tool[] = loadTools();
 let selected: string[] = ['o18', 'o116'];
@@ -221,6 +222,14 @@ $('fitStock').addEventListener('click', () => {
   fitStock();
   stockChanged();
 });
+function machineId(): MachineId {
+  const v = $<HTMLSelectElement>('machine').value as MachineId;
+  return v in MACHINES ? v : 'grbl';
+}
+function syncMachineNote() {
+  $('machineNote').textContent = MACHINES[machineId()].note;
+}
+$('machine').addEventListener('change', () => (syncMachineNote(), saveState(), invalidate()));
 for (const id of ['clear', 'rapid', 'stlUnits', 'floorPass', 'wallFinish', 'finStep']) $(id).addEventListener('change', () => (saveState(), invalidate()));
 
 // ---------------------------------------------------------------- tools
@@ -364,6 +373,7 @@ function buildJob(): Job25 {
   const mode = $<HTMLSelectElement>('cutMode').value;
   return {
     partName: model!.name,
+    machine: machineId(),
     tools: selected.map(toolById).filter((t): t is Tool => !!t && t.type === 'flat').map((t, i) => toTool25(t, i + 1)),
     stockThickness: num('sZ'),
     topOffset: Math.max(0, num('mTop') || 0),
@@ -520,6 +530,7 @@ function fmtTime(s: number) {
 }
 
 restoreState();
+syncMachineNote();
 syncCutoutFields();
 renderTools();
 updateGenerate();
