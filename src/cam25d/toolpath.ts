@@ -163,11 +163,19 @@ function buildTree(region: Shape, step: number, depth = 0): PocketNode {
  * Contour-parallel pocketing of the tool-centre domain T at depth z.
  * Material above z is assumed already cleared down to zAbove (so the approach can feed straight down to it).
  */
+/**
+ * The connected parts of a tool-centre domain that pocketLayer really cuts. Planning uses the same
+ * function to decide what counts as cut, so the two can never disagree (a sliver that simplifies away
+ * or a ring shorter than 0.05 mm is never cut).
+ */
+export function pocketRegions(T: Shape): Shape[] {
+  return regions(simplify(T, PATH_TOL)).filter((r) => ringLength(r[0]) >= 0.05);
+}
+
 export function pocketLayer(b: Builder, T: Shape, z: number, zAbove: number, opts: PocketOpts = {}) {
-  T = simplify(T, PATH_TOL);
   const tool = b.tool;
   const step = tool.diameter * tool.stepover;
-  const regs = regions(T).filter((r) => ringLength(r[0]) >= 0.05);
+  const regs = pocketRegions(T);
   const state: LayerState = { down: false, cut: [] };
   const done = new Set<Shape>();
   while (done.size < regs.length) {

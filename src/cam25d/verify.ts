@@ -2,8 +2,8 @@
  * Built-in verification: simulates the exported G-code (parsed back from text) on a heightmap
  * with a flat-end tool and checks gouges, floors, rapids, axial engagement, tab attachment and depth.
  */
-import { intersect, offset, opening, type Shape } from './geom';
-import type { Plan } from './plan';
+import { centroid, intersect, offset, opening, type Shape } from './geom';
+import { pocketable, type Plan } from './plan';
 import { checkFormat, dwellSeconds, machineFor, stripComment, type Machine } from './post';
 import type { Job25, Tool25 } from './types';
 
@@ -384,8 +384,29 @@ export function verifyJob(pos: Float32Array, plan: Plan, job: Job25, files: SimF
   const floorFails: string[] = [];
   const failMask = new Uint8Array(nx * ny);
   const ws = job.wallFinish ? 0 : job.finishStepover;
+  const holeFails: string[] = [];
+  let holeCount = 0;
   for (const band of plan.bands) {
-    if (band.level <= stock.bottom) continue;
+    if (band.level <= stock.bottom) {
+      // through-holes: wherever the smallest tool can be pocketed in, the stock must be cut through
+      // the job's smallest tool, not the files': a missing file must not hide an uncut hole
+      const rHole = Math.min(minTool, ...plan.tools.map((t) => t.diameter / 2));
+      for (const centres of pocketable(offset(band.region, -rHole))) {
+        holeCount++;
+        const mask = rasterizeShape(g, offset(offset(centres, rHole), -(ws + 0.1)));
+        let bad = 0, n = 0;
+        for (let k = 0; k < mask.length; k++) {
+          if (!mask[k]) continue;
+          n++;
+          if (g.h[k] > stock.bottom + 0.02) { bad++; failMask[k] = 1; }
+        }
+        if (bad) {
+          const c = centroid(centres[0]);
+          holeFails.push(`hole at X${(c.x - stock.minX).toFixed(1)} Y${(c.y - stock.minY).toFixed(1)}: ${bad}/${n} cells not cut through`);
+        }
+      }
+      continue;
+    }
     // reachable floor of this level, kept 0.1 mm (one grid cell) away from every wall and deeper pocket
     const reach = intersect(offset(opening(band.region, minTool), -(ws + 0.1)), offset(band.floor, -0.1));
     const mask = rasterizeShape(g, reach);
@@ -407,6 +428,11 @@ export function verifyJob(pos: Float32Array, plan: Plan, job: Job25, files: SimF
   checks.push({ name: `${machine.short} format`, ok: grblProblems.length === 0, detail: grblProblems.slice(0, 5).join('; ') || 'all rules pass' });
   checks.push({ name: 'No gouge', ok: gougeCount === 0, detail: gougeCount ? `${gougeCount} cells, up to ${gougeMax.toFixed(3)} mm into the part` : 'never below the model surface (0.02 mm tolerance)' });
   checks.push({ name: 'Floors exact', ok: floorFails.length === 0, detail: floorFails.join('; ') || 'all flat levels within ±0.02 mm' });
+  checks.push({
+    name: 'Through-holes cut',
+    ok: holeFails.length === 0,
+    detail: holeFails.join('; ') || (holeCount ? `${holeCount} hole${holeCount > 1 ? 's' : ''} cut through to the cut-out depth` : 'no through-holes'),
+  });
   checks.push({ name: 'Rapids clear', ok: rapidCount === 0, detail: rapidCount ? `${rapidCount} cells hit by G0 moves (${[...rapidFiles].map(([f, n]) => `file ${f.match(/_(\d+)_[^_]+_T\d+/)?.[1] ?? f}: ${n}`).join(', ')}); ${rapidFirst}` : 'no G0 move touches material' });
   checks.push({ name: 'Axial engagement', ok: engageFail === 0 && plungeCount === 0, detail: [engageFail ? `${engageFail} moves exceed stepdown, worst ${engageWorst.toFixed(3)} mm (${engageWhere})` : '', plungeCount ? `${plungeCount} straight plunges into material` : ''].filter(Boolean).join('; ') || 'within stepdown + 0.05 mm (ramps and wall finish exempt); plunges only into air' });
   checks.push({ name: 'Part attached by tabs', ok: attachFails.length === 0, detail: attachFails.slice(0, 3).join('; ') || 'attached after every cut-out pass' });

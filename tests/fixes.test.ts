@@ -202,3 +202,57 @@ describe('narrow slots with wall finish (tool fits only without wall stock)', ()
     expect(rest.some((m) => m.g !== 0 && inSlot(m) && m.z < 1.01)).toBe(true);
   });
 });
+
+describe('small through-holes and slots at tool-size edges', () => {
+  // Like the reported part: a solid 27 mm T-shaped block, no pockets, one small through-hole.
+  const T: Shape = union([rect(0, 12, 88, 20)], [rect(34, 0, 54, 12)]);
+  const run = (feature: Shape, tools = [{ ...DEFAULT_LARGE }, { ...DEFAULT_SMALL }]) => {
+    const tris: number[] = [];
+    extrude(difference(T, feature), 0, 27, tris);
+    return runJob(new Float32Array(tris), { ...defaultJob('t.stl'), tools });
+  };
+  const check = (o: ReturnType<typeof runJob>, name: string) => o.report.checks.find((c) => c.name === name)!;
+
+  it.each([3.38, 3.39, 3.4])(
+    '%s mm hole (1/8" fits only without wall stock, so it never roughs it): the 1/16" cuts it, no rapid into stock',
+    (d) => {
+      const o = run([circle(44, 7, d / 2, 64)]);
+      if (!o.report.ok) console.log(o.report.checks.filter((c) => !c.ok));
+      expect(check(o, 'Rapids clear').ok).toBe(true);
+      expect(check(o, 'Through-holes cut').detail).toMatch(/1 hole cut through/);
+      expect(o.report.ok).toBe(true);
+    },
+  );
+
+  it.each([1.65, 1.8, 1.82])('%s mm hole is cut through with its wall finish, not skipped', (d) => {
+    const o = run([circle(44, 7, d / 2, 64)]);
+    expect(o.report.ok).toBe(true);
+    expect(check(o, 'Through-holes cut').detail).toMatch(/1 hole cut through/);
+    expect(o.plan.warnings.join()).not.toMatch(/Wall finish skipped/);
+  });
+
+  it('a hole tighter than the smallest tool gets a clear warning', () => {
+    const o = run([circle(44, 7, 0.8, 64)]);
+    expect(o.plan.warnings.join()).toMatch(/Through-hole at X44\.0 Y7\.0 \(about D1\.6\d\) is too tight for the 1\/16in O-flute/);
+  });
+
+  it.each([1.59, 1.79])('%s mm slot (sliver tool-centre path) verifies with the 1/16"', (w) => {
+    const o = run([rect(38, 7 - w / 2, 50, 7 + w / 2)]);
+    if (!o.report.ok) console.log(o.report.checks.filter((c) => !c.ok));
+    expect(o.report.ok).toBe(true);
+  });
+
+  it('the verifier fails a through-hole that was never cut', () => {
+    const tris: number[] = [];
+    extrude(difference(T, [circle(44, 7, 1.0, 64)]), 0, 27, tris);
+    const pos = new Float32Array(tris);
+    const j = { ...defaultJob('t.stl'), tools: [{ ...DEFAULT_LARGE }, { ...DEFAULT_SMALL }] };
+    const o = runJob(pos, j);
+    expect(o.report.ok).toBe(true);
+    // drop the rest file that cuts the hole: only the cut-out remains
+    const files = o.files.map((f, i) => ({ name: f.name, text: f.text, tool: o.plan.files[i].tool })).filter((f) => !f.name.includes('rest'));
+    const r = verifyJob(pos, o.plan, j, files);
+    expect(r.checks.find((c) => c.name === 'Through-holes cut')!.ok).toBe(false);
+    expect(r.ok).toBe(false);
+  });
+});

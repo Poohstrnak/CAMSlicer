@@ -4,9 +4,9 @@
  *   2. rest machining (+ floor pass) and wall finishing with the small tool
  *   3. profile cut-out with tabs, large tool
  */
-import { area, difference, intersect, offset, opening, regions, union, type Shape } from './geom';
+import { area, centroid, difference, intersect, offset, opening, regions, union, type Shape } from './geom';
 import { SlicedModel } from './slice';
-import { Builder, cutout, placeTabs, PathLoop, pocketLayer, takeOp, wallFinish } from './toolpath';
+import { Builder, cutout, placeTabs, PathLoop, pocketLayer, pocketRegions, takeOp, wallFinish } from './toolpath';
 import type { Job25, NcPlan, Op, Stock25, Tool25 } from './types';
 
 /** Drop regions smaller than `minArea` mm² (slivers from slicing tolerance). */
@@ -35,7 +35,13 @@ export interface Band {
 
 /** Large-tool sweep of a region (centre domain shrunk by tool radius + wall stock, grown back by the radius). */
 export function swept(region: Shape, r: number, wallStock: number): Shape {
-  return offset(offset(region, -(r + wallStock)), r);
+  // only domains pocketLayer actually cuts: a centre domain too small to pocket was never swept
+  return offset(pocketable(offset(region, -(r + wallStock))).flat(), r);
+}
+
+/** Connected tool-centre regions pocketLayer actually cuts (same test it uses). */
+export function pocketable(centres: Shape): Shape[] {
+  return pocketRegions(centres);
 }
 
 /**
@@ -45,8 +51,9 @@ export function swept(region: Shape, r: number, wallStock: number): Shape {
  */
 export function thinOnly(region: Shape, r: number, ws: number): Shape {
   if (ws <= 0) return [];
-  const withStock = offset(offset(region, -(r + ws)), 0.01);
-  return regions(offset(region, -r)).filter((c) => area(intersect(c, withStock)) < 1e-6).flat();
+  // a with-stock domain too small to pocket counts as none (e.g. a 1.8 mm hole for a 1/16" tool)
+  const withStock = offset(pocketable(offset(region, -(r + ws))).flat(), 0.01);
+  return pocketable(offset(region, -r)).filter((c) => area(intersect(c, withStock)) < 1e-6).flat();
 }
 
 /** Region the small tool must clear after the large tool: (region shrunk by wall stock) minus the large sweep. */
@@ -110,6 +117,18 @@ export function planJob(pos: Float32Array, job: Job25): Plan {
   const L = tools[0];
   const rL = L.diameter / 2;
   const smallest = tools[tools.length - 1];
+  const holeBand = bands.find((bd) => bd.level === finalDepth && bd.floor.length === 0);
+  if (holeBand) {
+    for (const h of regions(holeBand.region)) {
+      if (pocketable(offset(h, -smallest.diameter / 2)).length) continue;
+      const c = centroid(h[0]);
+      const d = 2 * Math.sqrt(Math.max(0, area(h)) / Math.PI);
+      warnings.push(
+        `Through-hole at X${(c.x - stock.minX).toFixed(1)} Y${(c.y - stock.minY).toFixed(1)} (about D${d.toFixed(2)}) ` +
+          `is too tight for the ${smallest.name} (D${smallest.diameter}): it is not cut. Use a smaller tool or drill it.`,
+      );
+    }
+  }
   const candidates: NcPlan[] = [];
   const skipped: string[] = [];
 
@@ -236,7 +255,11 @@ function wallOps(b: Builder, bands: Band[], tool: Tool25, ws: number, stockTop: 
   for (const band of bands) {
     const path = offset(band.region, -r);
     if (!path.length) continue;
-    const cleared = union(offset(band.region, -(r + ws + 0.02)), thinOnly(band.region, r, ws));
+    // known air: the with-stock domain (0.02 mm margin), plus small holes the margin would erase
+    // (pocketed in full, e.g. a 1.82 mm hole for a 1/16" tool), plus slots roughed to size
+    const base = offset(band.region, -(r + ws + 0.02));
+    const small = pocketable(offset(band.region, -(r + ws))).filter((c) => !intersect(c, base).length).flat();
+    const cleared = union(union(base, small), thinOnly(band.region, r, ws));
     const at = b.moves.length;
     const skipped = wallFinish(b, path, cleared, band.level, ws);
     if (skipped) {
