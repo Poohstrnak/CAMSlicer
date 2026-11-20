@@ -11,7 +11,8 @@ import { checkGrbl, hasCuttingMoves, segLength } from '../src/cam25d/post';
 import { runJob } from '../src/cam25d/run';
 import { DEFAULT_LARGE, DEFAULT_SMALL, defaultJob, type Job25 } from '../src/cam25d/types';
 import { verifyJob } from '../src/cam25d/verify';
-import { circle, extrude, part, rect, toStl } from './parts';
+import { difference, union, type Shape } from '../src/cam25d/geom';
+import { circle, extrude, outline, part, pocketA, rect, toStl } from './parts';
 
 const ROOT = join(__dirname, '..');
 const sixteenth = { ...DEFAULT_SMALL, number: 1 }; // entered first on purpose
@@ -167,4 +168,37 @@ describe('verifier gate', () => {
     expect(code).toBe(1);
     expect(readdirSync(dir).filter((f) => f.endsWith('.nc'))).toEqual([]);
   }, 60_000);
+});
+
+describe('narrow slots with wall finish (tool fits only without wall stock)', () => {
+  // A 3.3 mm slot: the 1/8" (3.175 mm) tool fits, but not with 0.1 mm wall stock on both sides.
+  // Before the fix roughing skipped it and the wall finish rapided to 1 mm above the floor inside solid stock.
+  const slot33: Shape = [rect(10, 3, 50, 6.3)];
+  const tris: number[] = [];
+  extrude(outline, 0, 1, tris);
+  extrude(difference(outline, union(pocketA, slot33)), 1, 3, tris);
+  const pos = new Float32Array(tris);
+  const inSlot = (m: { x: number; y: number }) => m.y > 2.9 && m.y < 6.4 && m.x > 9.9 && m.x < 50.1;
+
+  it.each([
+    ['1/8" only', [{ ...DEFAULT_LARGE }]],
+    ['1/16" only', [{ ...DEFAULT_SMALL, number: 1, diameter: 3.2 }]],
+  ])('%s: slot is roughed to size, then verified (no rapids into stock, floor exact)', (_, tools) => {
+    const o = runJob(pos, { ...defaultJob('slot.stl'), tools });
+    if (!o.report.ok) console.log(o.report.checks.filter((c) => !c.ok));
+    expect(o.report.ok).toBe(true);
+    expect(o.plan.warnings.join()).not.toMatch(/Wall finish skipped/);
+    const rough = o.plan.files[0].ops.filter((op) => op.kind === 'rough').flatMap((op) => op.moves);
+    expect(rough.some((m) => m.g !== 0 && inSlot(m) && m.z < 1.01)).toBe(true);
+  });
+
+  it('two tools: the smallest roughs the slot to size in the rest file', () => {
+    const big = { ...DEFAULT_LARGE, name: '6mm flat', diameter: 6, stepdown: 1 };
+    // cut-out off: the 6 mm tool's tab issue is separate (tabs vs. a larger cut-out tool)
+    const o = runJob(pos, { ...defaultJob('slot.stl'), skipCutout: true, throughDepth: 0, tabCount: 0, tools: [big, { ...DEFAULT_LARGE, number: 2 }] });
+    if (!o.report.ok) console.log(o.report.checks.filter((c) => !c.ok));
+    expect(o.report.ok).toBe(true);
+    const rest = o.plan.files.find((f) => f.title === 'rest-detail')!.ops.filter((op) => op.kind === 'rest').flatMap((op) => op.moves);
+    expect(rest.some((m) => m.g !== 0 && inSlot(m) && m.z < 1.01)).toBe(true);
+  });
 });

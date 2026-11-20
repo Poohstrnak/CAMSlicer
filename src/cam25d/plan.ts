@@ -4,7 +4,7 @@
  *   2. rest machining (+ floor pass) and wall finishing with the small tool
  *   3. profile cut-out with tabs, large tool
  */
-import { area, difference, intersect, offset, opening, regions, type Shape } from './geom';
+import { area, difference, intersect, offset, opening, regions, union, type Shape } from './geom';
 import { SlicedModel } from './slice';
 import { Builder, cutout, placeTabs, PathLoop, pocketLayer, takeOp, wallFinish } from './toolpath';
 import type { Job25, NcPlan, Op, Stock25, Tool25 } from './types';
@@ -36,6 +36,17 @@ export interface Band {
 /** Large-tool sweep of a region (centre domain shrunk by tool radius + wall stock, grown back by the radius). */
 export function swept(region: Shape, r: number, wallStock: number): Shape {
   return offset(offset(region, -(r + wallStock)), r);
+}
+
+/**
+ * Tool-centre areas where the tool fits only without wall stock: narrow slots and holes between
+ * D and D + 2 × wall stock wide. They are roughed straight to size (there is no room to leave stock
+ * for the finish pass), and the wall finish enters them as cleared air.
+ */
+export function thinOnly(region: Shape, r: number, ws: number): Shape {
+  if (ws <= 0) return [];
+  const withStock = offset(offset(region, -(r + ws)), 0.01);
+  return regions(offset(region, -r)).filter((c) => area(intersect(c, withStock)) < 1e-6).flat();
 }
 
 /** Region the small tool must clear after the large tool: (region shrunk by wall stock) minus the large sweep. */
@@ -107,7 +118,8 @@ export function planJob(pos: Float32Array, job: Job25): Plan {
     const b = new Builder(L, safeZ, stockTop);
     const ops: Op[] = [];
     for (const band of bands) {
-      const T = offset(band.region, -(rL + ws));
+      let T = offset(band.region, -(rL + ws));
+      if (tools.length === 1) T = union(T, thinOnly(band.region, rL, ws)); // no smaller tool will rest them
       let zAbove = band.from;
       for (const z of splitLayers(band.from, band.level, L.stepdown)) {
         const at = b.moves.length;
@@ -122,7 +134,7 @@ export function planJob(pos: Float32Array, job: Job25): Plan {
         if (b.moves.length > at) ops.push(takeOp(b, at, `floor Z${fmtZ(band.level - stockTop)}`, 'floor'));
       }
     }
-    if (tools.length === 1 && job.wallFinish) ops.push(...wallOps(b, bands, L, ws, stockTop));
+    if (tools.length === 1 && job.wallFinish) ops.push(...wallOps(b, bands, L, ws, stockTop, warnings));
     b.retract();
     closeLast(ops, b);
     candidates.push({ index: 0, title: 'roughing', tool: L, ops });
@@ -139,10 +151,11 @@ export function planJob(pos: Float32Array, job: Job25): Plan {
     for (const band of bands) {
       const rest = restRegion(band.region, rP, ws);
       if (!rest.length) continue;
-      const T = intersect(offset(band.region, -(rS + ws)), offset(rest, rS - 0.005));
+      const thin = Sm === smallest ? thinOnly(band.region, rS, ws) : [];
+      const T = union(intersect(offset(band.region, -(rS + ws)), offset(rest, rS - 0.005)), thin);
       if (!T.length) continue;
       // plunge into area the larger tools already cleared to the band floor, then feed into the rest region
-      const As = offset(band.region, -(rS + ws)); // every centre here keeps the footprint off the walls
+      const As = union(offset(band.region, -(rS + ws)), thin); // every centre here keeps the footprint off the walls
       const air = intersect(offset(swept(band.region, rP, ws), -(rS + 0.02)), As);
       let zAbove = band.from;
       for (const z of splitLayers(band.from, band.level, Sm.stepdown)) {
@@ -158,7 +171,7 @@ export function planJob(pos: Float32Array, job: Job25): Plan {
         if (b.moves.length > at) ops.push(takeOp(b, at, `floor Z${fmtZ(band.level - stockTop)}`, 'floor'));
       }
     }
-    if (Sm === smallest && job.wallFinish) ops.push(...wallOps(b, bands, Sm, ws, stockTop));
+    if (Sm === smallest && job.wallFinish) ops.push(...wallOps(b, bands, Sm, ws, stockTop, warnings));
     b.retract();
     closeLast(ops, b);
     const plan: NcPlan = { index: 0, title: 'rest-detail', tool: Sm, ops };
@@ -217,15 +230,21 @@ export function hasCutting(f: NcPlan): boolean {
   return f.ops.some((o) => o.moves.some((m) => m.g !== 0));
 }
 
-function wallOps(b: Builder, bands: Band[], tool: Tool25, ws: number, stockTop: number): Op[] {
+function wallOps(b: Builder, bands: Band[], tool: Tool25, ws: number, stockTop: number, warnings: string[]): Op[] {
   const ops: Op[] = [];
   const r = tool.diameter / 2;
   for (const band of bands) {
     const path = offset(band.region, -r);
     if (!path.length) continue;
-    const cleared = offset(band.region, -(r + ws + 0.02));
+    const cleared = union(offset(band.region, -(r + ws + 0.02)), thinOnly(band.region, r, ws));
     const at = b.moves.length;
-    wallFinish(b, path, cleared, band.level);
+    const skipped = wallFinish(b, path, cleared, band.level, ws);
+    if (skipped) {
+      warnings.push(
+        `Wall finish skipped on ${skipped} wall${skipped > 1 ? 's' : ''} at Z${fmtZ(band.level - stockTop)}: ` +
+          `the ${tool.name} never fit there to rough it out. Add a smaller tool to machine that area.`,
+      );
+    }
     if (b.moves.length > at) ops.push(takeOp(b, at, `wall finish Z${fmtZ(band.level - stockTop)}`, 'wall'));
   }
   return ops;

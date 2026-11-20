@@ -356,9 +356,12 @@ export function helix(b: Builder, c: Pt, rh: number, zFrom: number, zTo: number,
 /**
  * Single full-depth wall-finishing pass along each ring of `path` (tool-centre path, climb orientation),
  * entering and leaving with tangent quarter arcs from inside `cleared` (tool-centre domain known to be air).
+ * Where there is no room for an arc, it enters with a short straight move from the nearest cleared point.
+ * Rings with no cleared air beside them (the roughing tool never fit there) are skipped, never plunged:
+ * returns how many were skipped.
  */
-export function wallFinish(b: Builder, path: Shape, cleared: Shape, z: number) {
-  const tool = b.tool;
+export function wallFinish(b: Builder, path: Shape, cleared: Shape, z: number, wallStock: number): number {
+  let skipped = 0;
   for (const ring0 of path) {
     if (ringLength(ring0) < 0.1) continue;
     const n = ring0.length;
@@ -390,13 +393,29 @@ export function wallFinish(b: Builder, path: Shape, cleared: Shape, z: number) {
       if (placed) break;
     }
     if (!placed) {
-      // no room for a lead-in: ramp along the ring from just above the floor
-      const ring = ring0;
-      b.approach(ring[0].x, ring[0].y, z + 0.1, z);
-      const at = rampAlongRing(b, ring, z + 0.1, z, tool.plunge);
-      lapFrom(b, ring, at, z);
+      // No room for an arc lead-in. Only the cleared domain is known to be air down to z, so drop in
+      // there and feed straight across the wall stock onto the ring. The ring itself is not cleared:
+      // the wall stock (and, where the roughing tool never fit, the full stock height) is still on it.
+      let bi = -1, bd = Infinity, bp: Pt | null = null;
+      for (let i = 0; i < ring0.length; i++) {
+        const P = nearestOnShape(cleared, ring0[i]);
+        if (!P) break;
+        const d = Math.hypot(P.x - ring0[i].x, P.y - ring0[i].y);
+        if (d < bd) { bd = d; bi = i; bp = P; }
+      }
+      if (!bp || bd > wallStock + 0.1) {
+        skipped++;
+        continue;
+      }
+      const ring = ring0.slice(bi).concat(ring0.slice(0, bi));
+      b.approach(bp.x, bp.y, z, z);
+      b.feed(ring[0].x, ring[0].y, z);
+      lapFrom(b, ring, 0, z);
+      b.feed(ring[0].x, ring[0].y, z);
+      b.feed(bp.x, bp.y, z);
     }
   }
+  return skipped;
 }
 
 // ---------------------------------------------------------------------------------------------
