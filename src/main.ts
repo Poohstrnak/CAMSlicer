@@ -9,6 +9,8 @@ import { loadModel, meshBounds, placeOnBed, rotate90 } from './loaders';
 import { DEFAULT_TOOLS, loadTools, newTool, saveTools, type Tool } from './tools';
 import { Viewer, type Box, type PreviewPath } from './viewer';
 
+declare const __BUILD__: string;
+
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const num = (id: string) => parseFloat($<HTMLInputElement>(id).value);
 
@@ -417,6 +419,19 @@ $('generate').addEventListener('click', () => {
     worker?.terminate();
     worker = null;
   };
+  // a crash inside the worker (uncaught error, out of memory, failed module load) never posts a message
+  const fail = (msg: string) => {
+    label.textContent = 'Error: ' + msg;
+    bar.style.width = '0%';
+    updateGenerate();
+    worker?.terminate();
+    worker = null;
+  };
+  worker.onerror = (e) => {
+    e.preventDefault();
+    fail(e.message || 'the toolpath worker crashed (the model may be too large)');
+  };
+  worker.onmessageerror = () => fail('could not read the worker result');
   const positions = model.pos.slice();
   worker.postMessage({ positions, job }, [positions.buffer]);
 });
@@ -529,6 +544,7 @@ function fmtTime(s: number) {
   return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${Math.max(1, m)} min`;
 }
 
+$('build').textContent = `build ${__BUILD__}`;
 restoreState();
 syncMachineNote();
 syncCutoutFields();
