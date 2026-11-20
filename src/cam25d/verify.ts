@@ -220,6 +220,8 @@ export function verifyJob(pos: Float32Array, plan: Plan, job: Job25, files: SimF
   for (let k = 0; k < g.model.length; k += 7) if (g.model[k] > NONE / 2) partCells.push(k);
 
   let gougeCount = 0, gougeMax = 0, rapidCount = 0, plungeCount = 0;
+  let rapidFirst = '';
+  const rapidFiles = new Map<string, number>();
   let engageFail = 0, engageWorst = 0, engageWhere = '';
   let minZ = Infinity;
   const attachFails: string[] = [];
@@ -326,7 +328,17 @@ export function verifyJob(pos: Float32Array, plan: Plan, job: Job25, files: SimF
             }
             if (core) {
               if (m.g === 0) {
-                if (hk > zc + 0.005) { g.rapidHit[k] = 1; rapidCount++; }
+                if (hk > zc + 0.005) {
+                  g.rapidHit[k] = 1;
+                  rapidCount++;
+                  rapidFiles.set(file.name, (rapidFiles.get(file.name) ?? 0) + 1);
+                  if (!rapidFirst) {
+                    const w = (v: number) => v.toFixed(2);
+                    rapidFirst = `first in file ${file.name.match(/_(\d+)_[^_]+_T\d+/)?.[1] ?? file.name}, ${m.op || 'header'}: ` +
+                      `G0 to X${w(m.x1 - stock.minX)} Y${w(m.y1 - stock.minY)} Z${w(m.z1 - stock.top)} ` +
+                      `passes Z${w(zc - stock.top)} over material at Z${w(hk - stock.top)} (X${w(qx - stock.minX)} Y${w(qy - stock.minY)})`;
+                  }
+                }
               } else if (!exempt) {
                 const e = hk - zc;
                 if (e > engage) engage = e;
@@ -395,7 +407,7 @@ export function verifyJob(pos: Float32Array, plan: Plan, job: Job25, files: SimF
   checks.push({ name: `${machine.short} format`, ok: grblProblems.length === 0, detail: grblProblems.slice(0, 5).join('; ') || 'all rules pass' });
   checks.push({ name: 'No gouge', ok: gougeCount === 0, detail: gougeCount ? `${gougeCount} cells, up to ${gougeMax.toFixed(3)} mm into the part` : 'never below the model surface (0.02 mm tolerance)' });
   checks.push({ name: 'Floors exact', ok: floorFails.length === 0, detail: floorFails.join('; ') || 'all flat levels within ±0.02 mm' });
-  checks.push({ name: 'Rapids clear', ok: rapidCount === 0, detail: rapidCount ? `${rapidCount} cells hit by G0 moves` : 'no G0 move touches material' });
+  checks.push({ name: 'Rapids clear', ok: rapidCount === 0, detail: rapidCount ? `${rapidCount} cells hit by G0 moves (${[...rapidFiles].map(([f, n]) => `file ${f.match(/_(\d+)_[^_]+_T\d+/)?.[1] ?? f}: ${n}`).join(', ')}); ${rapidFirst}` : 'no G0 move touches material' });
   checks.push({ name: 'Axial engagement', ok: engageFail === 0 && plungeCount === 0, detail: [engageFail ? `${engageFail} moves exceed stepdown, worst ${engageWorst.toFixed(3)} mm (${engageWhere})` : '', plungeCount ? `${plungeCount} straight plunges into material` : ''].filter(Boolean).join('; ') || 'within stepdown + 0.05 mm (ramps and wall finish exempt); plunges only into air' });
   checks.push({ name: 'Part attached by tabs', ok: attachFails.length === 0, detail: attachFails.slice(0, 3).join('; ') || 'attached after every cut-out pass' });
   checks.push({ name: 'Cut depth', ok: minZ >= finalDepth - 1e-3, detail: `deepest cut Z${(minZ - stock.top).toFixed(3)}, limit Z${(finalDepth - stock.top).toFixed(3)}` });
