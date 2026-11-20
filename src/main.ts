@@ -17,11 +17,12 @@ const num = (id: string) => parseFloat($<HTMLInputElement>(id).value);
 // v2: tab height now means "above the final cut-out depth"; older saved values (e.g. 2 mm from the
 // stock bottom) would leave tabs far too tall, so v1 settings are intentionally not restored.
 const STATE_KEY = 'camslicer.state.v2';
-const FIELDS = ['machine', 'sZ', 'mTop', 'cutMode', 'cutDepth', 'tabCount', 'tabW', 'tabH', 'clear', 'rapid', 'stlUnits', 'floorPass', 'wallFinish', 'finStep'];
+const FIELDS = ['machine', 'sZ', 'mTop', 'cutMode', 'cutDepth', 'tabCount', 'tabW', 'tabH', 'clear', 'rapid', 'stlUnits', 'floorPass', 'wallFinish', 'finStep', 'scaleLock'];
 
 let tools: Tool[] = loadTools();
 let selected: string[] = ['o18', 'o116'];
-let model: { name: string; pos: Float32Array } | null = null;
+/** `src` is the mesh as loaded (and rotated); `pos` = src scaled per axis by `scale`. */
+let model: { name: string; src: Float32Array; scale: [number, number, number]; pos: Float32Array } | null = null;
 let worker: Worker | null = null;
 
 interface Result {
@@ -125,6 +126,7 @@ function refreshModel(frame = false) {
     const sloped = slopedFaces(model.pos);
     $('fileInfo').textContent =
       `${d(0)} × ${d(1)} × ${d(2)} mm · ${(model.pos.length / 9).toLocaleString()} triangles` +
+      (model.scale.some((f) => Math.abs(f - 1) > 1e-9) ? ` · scaled ${model.scale.map((f) => +(f * 100).toFixed(1) + '%').join(' × ')}` : '') +
       (sloped ? ` · ⚠ ${sloped} sloped faces will be machined as flat steps` : '');
     showStockInfo(s);
     if (frame) viewer.frame(s);
@@ -180,7 +182,8 @@ async function openFile(file: File) {
   try {
     const pos = await loadModel(file, num('stlUnits') || 1);
     placeOnBed(pos);
-    model = { name: file.name, pos };
+    model = { name: file.name, src: pos, scale: [1, 1, 1], pos };
+    applyScale();
     refreshModel(true);
   } catch (e) {
     $('fileName').textContent = 'Could not load file';
@@ -209,11 +212,73 @@ for (const t of [drop, document.body]) {
 document.querySelectorAll<HTMLButtonElement>('[data-rot]').forEach((b) =>
   b.addEventListener('click', () => {
     if (!model) return;
-    rotate90(model.pos, b.dataset.rot as 'x' | 'y' | 'z');
-    placeOnBed(model.pos);
+    const axis = b.dataset.rot as 'x' | 'y' | 'z';
+    rotate90(model.src, axis);
+    placeOnBed(model.src);
+    // the part turns with its scaling: the two axes that swap places swap factors too
+    const [i, j] = axis === 'x' ? [1, 2] : axis === 'y' ? [0, 2] : [0, 1];
+    [model.scale[i], model.scale[j]] = [model.scale[j], model.scale[i]];
+    applyScale();
     refreshModel(true);
   }),
 );
+
+// ---------------------------------------------------------------- scaling
+const AXES = ['X', 'Y', 'Z'] as const;
+
+/** Rebuild `model.pos` from the loaded mesh and the per-axis factors, sitting on the bed. */
+function applyScale() {
+  if (!model) return;
+  const { src, scale } = model;
+  const pos = new Float32Array(src.length);
+  for (let i = 0; i < src.length; i += 3) {
+    pos[i] = src[i] * scale[0];
+    pos[i + 1] = src[i + 1] * scale[1];
+    pos[i + 2] = src[i + 2] * scale[2];
+  }
+  placeOnBed(pos);
+  model.pos = pos;
+  syncScaleFields();
+}
+
+function syncScaleFields() {
+  const b = model ? meshBounds(model.src) : null;
+  AXES.forEach((a, k) => {
+    const mm = $<HTMLInputElement>('size' + a), pct = $<HTMLInputElement>('pct' + a);
+    mm.disabled = pct.disabled = !model;
+    mm.value = b ? String(+((b.max[k] - b.min[k]) * model!.scale[k]).toFixed(2)) : '';
+    pct.value = model ? String(+(model.scale[k] * 100).toFixed(2)) : '';
+  });
+}
+
+function setScale(k: number, factor: number) {
+  if (!model) return;
+  if (!(factor > 0) || !Number.isFinite(factor)) return syncScaleFields(); // reject 0, negative or empty
+  if ($<HTMLInputElement>('scaleLock').checked) {
+    const ratio = factor / model.scale[k];
+    model.scale = model.scale.map((s) => s * ratio) as [number, number, number];
+  } else model.scale[k] = factor;
+  applyScale();
+  refreshModel(true);
+}
+
+AXES.forEach((a, k) => {
+  $('size' + a).addEventListener('change', () => {
+    if (!model) return;
+    const b = meshBounds(model.src);
+    const orig = b.max[k] - b.min[k];
+    if (orig <= 0) return syncScaleFields();
+    setScale(k, num('size' + a) / orig);
+  });
+  $('pct' + a).addEventListener('change', () => setScale(k, num('pct' + a) / 100));
+});
+$('scaleReset').addEventListener('click', () => {
+  if (!model) return;
+  model.scale = [1, 1, 1];
+  applyScale();
+  refreshModel(true);
+});
+$('scaleLock').addEventListener('change', saveState);
 for (const id of ['sZ', 'mTop', 'cutDepth', 'tabCount', 'tabW', 'tabH']) $(id).addEventListener('change', stockChanged);
 $('cutMode').addEventListener('change', () => {
   syncCutoutFields();

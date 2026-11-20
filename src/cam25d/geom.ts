@@ -35,6 +35,21 @@ function fromPaths(paths: Paths64): Shape {
 export function union(a: Shape, b: Shape = []): Shape {
   return fromPaths(Clipper.union(toPaths(a), toPaths(b), FillRule.NonZero));
 }
+/**
+ * Union of many small CCW rings (e.g. projected triangles). Clipper slows down badly on one huge
+ * input, so union in small batches and merge the results pairwise.
+ */
+export function unionMany(rings: Shape, batch = 256): Shape {
+  if (rings.length <= batch) return union(rings);
+  let layer: Shape[] = [];
+  for (let i = 0; i < rings.length; i += batch) layer.push(union(rings.slice(i, i + batch)));
+  while (layer.length > 1) {
+    const next: Shape[] = [];
+    for (let i = 0; i < layer.length; i += 2) next.push(i + 1 < layer.length ? union(layer[i], layer[i + 1]) : layer[i]);
+    layer = next;
+  }
+  return layer[0];
+}
 /** Union of rings given with arbitrary orientation, using even-odd (for raw slice loops). */
 export function unionEvenOdd(a: Shape): Shape {
   return fromPaths(Clipper.union(toPaths(a), FillRule.EvenOdd));

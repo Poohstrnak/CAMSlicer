@@ -49,6 +49,10 @@ button.link { background: none; border: none; color: var(--accent); padding: 0; 
 .row .lbl { color: var(--muted); font-size: 12px; margin-right: 4px; }
 .row select { flex: 1; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px 8px; margin-top: 4px; }
+.grid3 input { min-width: 0; width: 100%; box-sizing: border-box; }
+label.inline { flex-direction: row; align-items: center; gap: 5px; color: var(--text); }
+.scale .row button.link { margin-left: auto; }
 .muted { color: var(--muted); }
 .small { font-size: 11px; margin: 6px 0 0; }
 .drop {

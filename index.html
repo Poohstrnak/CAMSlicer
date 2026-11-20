@@ -40,6 +40,21 @@
           <span class="lbl">Rotate 90°</span>
           <button data-rot="x">X</button><button data-rot="y">Y</button><button data-rot="z">Z</button>
         </div>
+        <div class="scale">
+          <div class="row">
+            <span class="lbl">Size</span>
+            <label class="inline" title="Change all axes together"><input id="scaleLock" type="checkbox" checked /> Keep proportions</label>
+            <button id="scaleReset" class="link" title="Back to the file's original size">Reset</button>
+          </div>
+          <div class="grid3">
+            <label>X (mm) <input id="sizeX" type="number" step="0.1" min="0.01" disabled /></label>
+            <label>Y (mm) <input id="sizeY" type="number" step="0.1" min="0.01" disabled /></label>
+            <label>Z (mm) <input id="sizeZ" type="number" step="0.1" min="0.01" disabled /></label>
+            <label>X % <input id="pctX" type="number" step="1" min="0.1" disabled /></label>
+            <label>Y % <input id="pctY" type="number" step="1" min="0.1" disabled /></label>
+            <label>Z % <input id="pctZ" type="number" step="1" min="0.1" disabled /></label>
+          </div>
+        </div>
       </section>
 
       <section>
