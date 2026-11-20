@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CAM Slicer</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <aside id="sidebar">
+      <header class="brand">CAM Slicer <span>2.5D milling</span></header>
+
+      <section>
+        <h2>Model</h2>
+        <label id="drop" class="drop">
+          <input id="file" type="file" accept=".stl,.step,.stp,.iges,.igs" hidden />
+          <strong id="fileName">Drop STL / STEP here</strong>
+          <small id="fileInfo">or click to browse</small>
+        </label>
+        <div class="row">
+          <label>STL units
+            <select id="stlUnits"><option value="1">mm</option><option value="25.4">inch</option></select>
+          </label>
+        </div>
+        <div class="row buttons">
+          <span class="lbl">Rotate 90°</span>
+          <button data-rot="x">X</button><button data-rot="y">Y</button><button data-rot="z">Z</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Stock</h2>
+        <div class="grid2">
+          <label>Height (mm) <input id="sZ" type="number" step="0.5" min="0" /></label>
+          <label title="Material above the top of the part">Part top offset <input id="mTop" type="number" step="0.5" min="0" value="1" /></label>
+        </div>
+        <div class="row buttons">
+          <button id="fitStock">Fit height to part</button>
+        </div>
+        <label class="stack">Cut-out
+          <select id="cutMode">
+            <option value="tabs" selected>Cut through + tabs</option>
+            <option value="through">Cut through, no tabs (part comes loose at the end)</option>
+            <option value="base">No cut-out (leave the part in the sheet)</option>
+          </select>
+        </label>
+        <div class="grid2">
+          <label data-cut="through tabs" title="How far below the stock bottom to cut, e.g. into the spoilboard">Through depth (mm) <input id="cutDepth" type="number" step="0.1" min="0" value="0.3" /></label>
+          <label data-cut="tabs">Tabs <input id="tabCount" type="number" step="1" min="1" value="6" /></label>
+          <label data-cut="tabs">Tab width (mm) <input id="tabW" type="number" step="0.5" min="0.5" value="6" /></label>
+          <label data-cut="tabs" title="Tab top = final cut-out depth + this height">Tab height (mm) <input id="tabH" type="number" step="0.1" min="0.1" value="0.8" /></label>
+        </div>
+        <div class="muted" id="stockInfo">—</div>
+      </section>
+
+      <section>
+        <h2>Tools <button id="openLib" class="link">Tool library…</button></h2>
+        <div id="toolChecks" class="toolchecks"></div>
+        <ol id="runOrder" class="runorder"></ol>
+        <div class="row checks">
+          <label><input id="floorPass" type="checkbox" checked /> Floor pass</label>
+          <label><input id="wallFinish" type="checkbox" checked /> Wall finish</label>
+        </div>
+        <div class="grid2">
+          <label title="Radial stock left by roughing and removed by the full-depth wall pass">Finish stock (mm) <input id="finStep" type="number" step="0.05" min="0" value="0.1" /></label>
+        </div>
+        <p class="muted small">Tools are always used largest-first: the largest roughs and cuts out, smaller ones only machine what it couldn't reach. Same XY zero for every file; re-zero Z after each bit change. Every file is verified by simulation before it can be exported.</p>
+      </section>
+
+      <section>
+        <h2>Settings</h2>
+        <div class="grid2">
+          <label>Safe Z clearance <input id="clear" type="number" step="1" min="1" value="5" /></label>
+          <label>Rapid rate (mm/min) <input id="rapid" type="number" step="100" min="100" value="3000" /></label>
+        </div>
+      </section>
+
+      <button id="generate" class="primary" disabled>Generate toolpaths</button>
+      <div id="progress" class="progress" hidden><div></div><span></span></div>
+    </aside>
+
+    <main>
+      <div id="viewport"></div>
+      <div id="overlay" class="overlay">
+        <div class="toggles">
+          <label><input id="showPart" type="checkbox" checked /> Part</label>
+          <label>Stock sim <select id="simSel"><option value="-1">off</option></select></label>
+        </div>
+      </div>
+      <div id="results" hidden>
+        <div id="verify" hidden>
+          <div class="vhead"><strong id="verifyTitle"></strong><span id="verifyTime" class="muted"></span>
+            <button id="dlReport">Download report</button></div>
+          <div class="vbody">
+            <ul id="checks"></ul>
+            <a id="reportImgLink" target="_blank" title="Open full-size heightmap"><img id="reportImg" alt="Simulated top-down heightmap; gouges would show in red" /></a>
+          </div>
+        </div>
+        <div id="cards"></div>
+        <div class="playback">
+          <input id="scrub" type="range" min="0" max="1000" value="1000" />
+          <span id="scrubInfo"></span>
+          <button id="exportAll">Export all files</button>
+        </div>
+      </div>
+    </main>
+
+    <dialog id="libDialog">
+      <h2>Tool library</h2>
+      <div class="tablewrap"><table id="libTable"></table></div>
+      <div class="row buttons end">
+        <button id="libReset" class="link">Reset defaults</button>
+        <button id="libAdd">New tool</button>
+        <button id="libClose" class="primary">Done</button>
+      </div>
+    </dialog>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,8 @@
+node_modules
+dist
+public/occt
+.git
+tests
+samples
+*.log
+.DS_Store
